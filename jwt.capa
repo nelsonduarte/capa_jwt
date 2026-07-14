@@ -1,0 +1,255 @@
+// capa_jwt.jwt
+//
+// JSON Web Tokens (RFC 7519) over a JSON Web Signature (RFC 7515) with
+// the HS256 algorithm (HMAC-SHA256, RFC 7518 section 3.2). Pure Capa:
+// signing and verifying a token are data transforms over `String` and
+// `List<Int>` bytes, so nothing here can touch the filesystem, the
+// network, the clock, randomness, or anything else. The verifier takes
+// NO `Clock`; expiry is checked against a `now` the caller supplies, so
+// the whole library keeps its empty capability surface. `capa --manifest`
+// proves it. Output is byte-identical on the Python and Wasm backends.
+//
+// The signature is `HMAC-SHA256(key, header_b64 + "." + payload_b64)`,
+// base64url-encoded without padding. This module composes it from two
+// pure seed libraries: `capa_hash` for the HMAC and the constant-time
+// tag comparison, and `capa_base64` for base64url. It never compares a
+// signature with `==` (a timing side channel); it re-encodes the
+// recomputed signature and compares it to the presented one in constant
+// time via `capa_hash.verify`.
+//
+// SECURITY: the #1 JWT vulnerability is algorithm confusion, where an
+// attacker swaps the header's `alg` to `none` (and strips the
+// signature) or to another algorithm to bypass verification. This
+// verifier decodes the header and REQUIRES `alg` to be exactly
+// `"HS256"` BEFORE it trusts any signature; `none`, `HS384`, `RS256`, a
+// missing `alg`, or a non-object header are all rejected with
+// `UnsupportedAlgorithm`. See the README's "Honest posture".
+
+import capa_base64.base64
+import capa_hash.hmac
+import capa_hash.verify
+
+// The fixed JOSE header for HS256, serialized EXACTLY as
+// `{"alg":"HS256","typ":"JWT"}` (no spaces, this key order). Emitting a
+// byte-stable header is what lets `sign_hs256` reproduce the well-known
+// jwt.io vector, and any published HS256 token, byte for byte.
+const HEADER: String = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+
+// The 95 printable ASCII characters, 0x20..0x7E, indexed by
+// `code_point - 0x20`. Capa has no bytes-to-`String` primitive (a
+// `String` is built only from literals and `char_at` lookups, never
+// from arbitrary bytes), so a decoded JWT segment is reconstructed by
+// mapping each byte through this table. See `ascii_from_bytes` and the
+// README's "ASCII JSON payloads" scope note.
+const ASCII: String = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+// 2^63, exactly representable as a Float. The signed 64-bit `Int` range
+// is [-2^63, 2^63). A JSON `exp` is parsed as a Float; converting one at
+// or beyond this magnitude to an `Int` TRAPS on the Wasm backend
+// (`integer overflow`) while the Python backend silently succeeds, so
+// `is_expired` range-checks the Float against this bound FIRST (a Float
+// comparison never traps) and rejects an out-of-range `exp` as
+// `InvalidClaim`, identically on both backends.
+const TWO_POW_63: Float = 9223372036854775808.0
+
+/// The typed error a verify / claim call returns instead of panicking
+/// or guessing. `MalformedToken` covers a wrong segment count and any
+/// base64 / JSON / encoding failure; `UnsupportedAlgorithm` covers the
+/// algorithm-confusion defense (anything but `alg:"HS256"`);
+/// `InvalidSignature` is a well-formed HS256 token whose tag does not
+/// match; `InvalidClaim` covers a missing or ill-typed claim.
+pub type JwtError =
+    MalformedToken(String)       // segment count, base64, JSON, or encoding
+    UnsupportedAlgorithm(String) // header `alg` is not exactly "HS256"
+    InvalidSignature             // HS256 tag does not match the key
+    InvalidClaim(String)         // a claim is absent or the wrong type
+
+/// A human-readable message for a `JwtError`.
+pub fun jwt_error_message(e: JwtError) -> String
+    return match e
+        MalformedToken(m)       -> "malformed token: ${m}"
+        UnsupportedAlgorithm(a) -> "unsupported algorithm: ${a}"
+        InvalidSignature        -> "invalid signature"
+        InvalidClaim(m)         -> "invalid claim: ${m}"
+
+// ---------------------------------------------------------------
+// Byte / text helpers.
+
+/// Reconstruct text from the bytes of a decoded JWT segment. Capa has
+/// no bytes-to-`String` primitive, so each byte is mapped through the
+/// printable-ASCII table (plus tab, newline, carriage return). A byte
+/// outside that set means the segment is not ASCII JSON text and cannot
+/// be represented as a `String`; the caller turns `None` into a
+/// `MalformedToken`. Compact JSON (as emitted by the common encoders,
+/// which escape non-ASCII as `\uXXXX`) is entirely in this range. See
+/// the README's scope note.
+fun ascii_from_bytes(bytes: List<Int>) -> Option<String>
+    var out = ""
+    for b in bytes
+        let v = b & 0xFF
+        if v == 0x09
+            out = "${out}\t"
+        elif v == 0x0A
+            out = "${out}\n"
+        elif v == 0x0D
+            out = "${out}\r"
+        elif v >= 0x20 and v <= 0x7E
+            match ASCII.char_at(v - 0x20)
+                Some(c) -> out = "${out}${c}"
+                None    -> return None
+        else
+            return None
+    return Some(out)
+
+/// Decode one base64url JWT segment (canonical / strict, no padding) to
+/// its ASCII-JSON text, or a `MalformedToken` naming why it could not be
+/// represented. `what` is the segment name for the message. The strict
+/// canonical decoder is used so a segment has exactly one accepted
+/// encoding (no signature-malleability footgun).
+fun decode_segment(seg: String, what: String) -> Result<String, JwtError>
+    return match decode_url_strict(seg)
+        Err(e)     -> Err(MalformedToken("${what} is not valid base64url: ${base64_error_message(e)}"))
+        Ok(bytes)  -> match ascii_from_bytes(bytes)
+            None       -> Err(MalformedToken("${what} is not ASCII JSON text"))
+            Some(text) -> Ok(text)
+
+// ---------------------------------------------------------------
+// Algorithm gate (the algorithm-confusion defense).
+
+/// Given a parsed header, return `None` when it is acceptable, or
+/// `Some(UnsupportedAlgorithm(...))` for anything else: a non-object
+/// header, a `crit` (critical) parameter this library does not
+/// understand, a missing `alg`, a non-string `alg`, or a different
+/// algorithm (`none`, `HS384`, `RS256`, ...). This is the gate that
+/// rejects the alg=none / algorithm-confusion attack before any
+/// signature is trusted.
+fun alg_error(header: JsonValue) -> Option<JwtError>
+    return match header.as_object()
+        None      -> Some(UnsupportedAlgorithm("header is not a JSON object"))
+        Some(obj) -> object_header_error(obj)
+
+/// Check an object header. RFC 7515 section 4.1.11 requires a verifier
+/// to REJECT a JWS carrying a `crit` (critical header parameter) it does
+/// not understand; this library understands no critical extensions, so
+/// ANY `crit` member is a rejection, checked before `alg`. Otherwise the
+/// header is accepted only when `alg` is exactly `"HS256"`.
+fun object_header_error(obj: Map<String, JsonValue>) -> Option<JwtError>
+    if obj.contains_key("crit")
+        return Some(UnsupportedAlgorithm("header carries an unsupported 'crit' (critical) parameter"))
+    return match obj.get("alg")
+        None     -> Some(UnsupportedAlgorithm("header has no 'alg' parameter"))
+        Some(av) -> match av.as_string()
+            None      -> Some(UnsupportedAlgorithm("header 'alg' is not a string"))
+            Some(alg) -> if alg == "HS256" then None else Some(UnsupportedAlgorithm(alg))
+
+/// Decode and check the header segment: `None` on a valid `HS256`
+/// header, otherwise the typed reason (a `MalformedToken` for a
+/// base64 / JSON failure, or an `UnsupportedAlgorithm` from the gate).
+fun header_error(header_b64: String) -> Option<JwtError>
+    return match decode_segment(header_b64, "header")
+        Err(e)    -> Some(e)
+        Ok(text)  -> match parse_json(text)
+            Err(m)   -> Some(MalformedToken("header is not valid JSON: ${m}"))
+            Ok(j)    -> alg_error(j)
+
+// ---------------------------------------------------------------
+// Public surface.
+
+/// Sign a JSON payload as an HS256 JWT. The header is exactly
+/// `{"alg":"HS256","typ":"JWT"}`; the header and `payload_json` are
+/// base64url-encoded (no padding), the signing input is
+/// `header_b64 + "." + payload_b64`, and the signature is
+/// `HMAC-SHA256(key, signing_input)` base64url-encoded. Returns
+/// `signing_input + "." + sig_b64`. Pure, zero capabilities.
+///
+/// The `key` is raw bytes (`List<Int>`, each 0..255); derive it from a
+/// secret String with `String.bytes()`. The payload is passed through
+/// verbatim, so the caller controls the claim JSON exactly.
+pub fun sign_hs256(payload_json: String, key: List<Int>) -> String
+    let header_b64 = encode_url(HEADER.bytes())
+    let payload_b64 = encode_url(payload_json.bytes())
+    let signing_input = "${header_b64}.${payload_b64}"
+    let sig_b64 = encode_url(hmac_sha256_bytes(key, signing_input.bytes()))
+    return "${signing_input}.${sig_b64}"
+
+/// Verify an HS256 JWT under `key` and return its payload JSON on
+/// success. The token must have exactly three `.`-separated segments
+/// (else `MalformedToken`); the header must name `alg:"HS256"` (else
+/// `UnsupportedAlgorithm`, which is how the alg=none / algorithm-
+/// confusion attack is rejected); and the recomputed
+/// `HMAC-SHA256(key, header_b64 + "." + payload_b64)`, base64url-encoded,
+/// must equal the presented signature under a CONSTANT-TIME string
+/// compare (else `InvalidSignature`). Only after the signature verifies
+/// is the trusted payload decoded and returned. Pure, zero capabilities.
+///
+/// The comparison re-encodes OUR signature and compares that string to
+/// the token's third segment with `capa_hash.verify.strings_equal`, so
+/// the attacker-supplied signature is never decoded into an ambiguous
+/// form and `==` (a prefix-length timing oracle) is never used.
+pub fun verify_hs256(token: String, key: List<Int>) -> Result<String, JwtError>
+    let parts = token.split(".")
+    if parts.length() != 3
+        return Err(MalformedToken("expected three '.'-separated segments, got ${parts.length()}"))
+    let header_b64 = parts[0]
+    let payload_b64 = parts[1]
+    let sig_b64 = parts[2]
+
+    // Algorithm gate FIRST: no signature is trusted until the header
+    // names HS256. This is the defense against alg=none / confusion.
+    let bad_alg = header_error(header_b64)
+    if bad_alg.is_some()
+        return Err(bad_alg.unwrap())
+
+    // Recompute the tag over the exact signing input and compare in
+    // constant time. We re-encode ours; we never decode theirs.
+    let signing_input = "${header_b64}.${payload_b64}"
+    let expected = encode_url(hmac_sha256_bytes(key, signing_input.bytes()))
+    if not strings_equal(expected, sig_b64)
+        return Err(InvalidSignature)
+
+    // The signature verified: the payload is now trusted. Decode it.
+    return decode_segment(payload_b64, "payload")
+
+/// Whether the token payload is expired at `now` (Unix seconds). Parses
+/// `payload_json`, reads the integer `exp` claim, and returns
+/// `Ok(exp <= now)`. A missing `exp` is `Err(InvalidClaim(...))` rather
+/// than a silent `Ok(false)`: expiry is a security decision the caller
+/// must make deliberately, so a token with no `exp` is surfaced, not
+/// treated as never-expiring. A non-object payload, a non-number `exp`,
+/// a non-integer `exp`, or an `exp` outside the signed 64-bit integer
+/// range is also an `InvalidClaim`; an unparseable payload is a
+/// `MalformedToken`. Pure, zero capabilities: the caller holds the
+/// `Clock` and passes `now`; this library never reads the time.
+///
+/// `exp` is a JSON number, so it is parsed as a Float: an integer `exp`
+/// above 2^53 loses precision, and one at or beyond the i64 bound is
+/// rejected (see `exp_result`) rather than trapping on the Wasm backend.
+pub fun is_expired(payload_json: String, now: Int) -> Result<Bool, JwtError>
+    return match parse_json(payload_json)
+        Err(m)  -> Err(MalformedToken("payload is not valid JSON: ${m}"))
+        Ok(j)   -> match j.as_object()
+            None      -> Err(InvalidClaim("payload is not a JSON object"))
+            Some(obj) -> match obj.get("exp")
+                None     -> Err(InvalidClaim("payload has no 'exp' claim"))
+                Some(ev) -> exp_result(ev, now)
+
+/// Interpret a parsed `exp` claim against `now`. The number is read as a
+/// Float and RANGE-CHECKED against the i64 bound BEFORE any conversion:
+/// a Float comparison cannot trap, whereas converting an out-of-range
+/// Float to an `Int` traps on Wasm (`integer overflow`) but not on
+/// Python. An `exp` with `exp_f >= 2^63` or `exp_f < -2^63` is a
+/// deterministic `InvalidClaim` on both backends (matching the i64 range
+/// [-2^63, 2^63), so exactly -2^63 is accepted); an in-range value is
+/// then read as an integer (`as_int` rejects a non-integral Float) and
+/// compared.
+fun exp_result(ev: JsonValue, now: Int) -> Result<Bool, JwtError>
+    return match ev.as_num()
+        None        -> Err(InvalidClaim("'exp' claim is not a number"))
+        Some(exp_f) -> if exp_f >= TWO_POW_63 or exp_f < (0.0 - TWO_POW_63) then Err(InvalidClaim("'exp' claim is out of the signed 64-bit integer range")) else exp_in_range(ev, now)
+
+/// Compare an `exp` already proven to be within the i64 range. `as_int`
+/// is safe here (no trap) and still rejects a non-integral `exp`.
+fun exp_in_range(ev: JsonValue, now: Int) -> Result<Bool, JwtError>
+    return match ev.as_int()
+        None      -> Err(InvalidClaim("'exp' claim is not an integer"))
+        Some(exp) -> Ok(exp <= now)

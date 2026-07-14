@@ -1,0 +1,56 @@
+// example.capa
+//
+// Sign an HS256 JWT, verify it, read a claim, and watch a tampered
+// token fail. The library itself is pure (no capabilities at all); the
+// only capability here is the example's own Stdio, used to print. The
+// signing, verifying, and expiry functions never touch it, and the
+// verifier takes no Clock: the example passes `now` in from its own
+// side. That is the whole showcase: you can verify a token holding NO
+// authority.
+//
+// Run from the repository root:
+//
+//     capa install                     # vendor capa_base64 + capa_hash
+//     capa --run example.capa
+//     capa --wasm --run example.capa   # byte-identical output
+
+import capa_jwt.jwt
+
+fun main(stdio: Stdio)
+    // A secret key as raw bytes (derive it from a String's UTF-8 bytes).
+    let key = "your-256-bit-secret".bytes()
+
+    // Sign a claim set. The header is always {"alg":"HS256","typ":"JWT"}.
+    let payload = "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"exp\":2000000000}"
+    let token = sign_hs256(payload, key)
+    stdio.println("token:   ${token}")
+
+    // Verify under the same key. On success we get the payload JSON back.
+    match verify_hs256(token, key)
+        Ok(claims) ->
+            stdio.println("verify:  ok")
+            stdio.println("claims:  ${claims}")
+        Err(e) ->
+            stdio.println("verify:  ${jwt_error_message(e)}")
+
+    // Check expiry against a caller-supplied `now` (the caller holds the
+    // Clock; the library never reads the time). 1_600_000_000 is in the
+    // past relative to the token's exp of 2_000_000_000, so: not expired.
+    match is_expired(payload, 1600000000)
+        Ok(expired) -> stdio.println("expired: ${expired}")
+        Err(e)      -> stdio.println("expired: ${jwt_error_message(e)}")
+
+    // Tamper with the token: flip the last character of the signature.
+    // The recomputed HMAC no longer matches, so verification fails. A
+    // real verifier compares the tag in CONSTANT TIME (never with ==);
+    // this one does, via capa_hash.verify.
+    let n = token.length()
+    let last = match token.char_at(n - 1)
+        Some(c) -> c
+        None    -> ""
+    let flipped = if last == "c" then "d" else "c"
+    let tampered = "${token.substring(0, n - 1)}${flipped}"
+    stdio.println("tampered:${tampered}")
+    match verify_hs256(tampered, key)
+        Ok(_)  -> stdio.println("verify:  ACCEPTED A TAMPERED TOKEN (bug)")
+        Err(e) -> stdio.println("verify:  rejected tampered token (${jwt_error_message(e)})")

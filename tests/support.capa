@@ -1,0 +1,33 @@
+// tests/support.capa
+//
+// Small renderers shared by the suite. A verify / expiry result is
+// reduced to a stable `String` so the exact outcome (the payload, or
+// the error KIND) can be pinned with the `eq_str` assertions, on both
+// backends.
+
+import capa_jwt.jwt
+
+/// A short, stable tag for a `JwtError` variant, ignoring its message,
+/// so a test can assert the exact error KIND without depending on the
+/// human-readable wording.
+pub fun error_tag(e: JwtError) -> String
+    return match e
+        MalformedToken(_)       -> "MalformedToken"
+        UnsupportedAlgorithm(_) -> "UnsupportedAlgorithm"
+        InvalidSignature        -> "InvalidSignature"
+        InvalidClaim(_)         -> "InvalidClaim"
+
+/// Render a `verify_hs256` result: the payload JSON on `Ok`, or the
+/// error tag prefixed with `err:` on `Err`. Payloads are JSON objects
+/// (they start with `{`), so they never collide with an `err:` tag.
+pub fun verify_outcome(r: Result<String, JwtError>) -> String
+    return match r
+        Ok(payload) -> payload
+        Err(e)      -> "err:${error_tag(e)}"
+
+/// Render an `is_expired` result: `true` / `false` on `Ok`, or the
+/// error tag prefixed with `err:` on `Err`.
+pub fun expired_outcome(r: Result<Bool, JwtError>) -> String
+    return match r
+        Ok(b)  -> if b then "true" else "false"
+        Err(e) -> "err:${error_tag(e)}"

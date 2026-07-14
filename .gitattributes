@@ -1,0 +1,5 @@
+# Keep every committed file LF-terminated on every platform, so a
+# Windows checkout does not rewrite source, fixtures, or signatures
+# to CRLF (which would change bytes the lockfile and tag signature
+# cover).
+* text eol=lf

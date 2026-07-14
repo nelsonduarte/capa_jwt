@@ -1,0 +1,214 @@
+// tests/test_jwt.capa
+//
+// HS256 JWT against the well-known jwt.io vector and the Python stdlib
+// oracle (hmac / hashlib / base64 / json, cross-checked with PyJWT
+// where installed), plus round-trips and the full security battery. The
+// expected tokens were computed OUTSIDE the repo with the oracle and
+// baked in here; the suite re-asserts them on both backends.
+//
+// The battery is the point of the library: a tampered payload, a
+// tampered signature, and a token re-signed under a different key all
+// fail with `InvalidSignature`; an `alg:"none"` token (with its empty
+// signature), an `alg:"HS384"` / `"RS256"` token, a non-object header,
+// and a missing `alg` are all rejected with `UnsupportedAlgorithm`
+// (the algorithm-confusion defense) BEFORE any signature is trusted;
+// and malformed inputs are `MalformedToken`.
+
+import capa_test.testing
+import capa_jwt.jwt
+import support
+
+// The jwt.io HS256 secret, as raw key bytes.
+fun jwtio_key() -> List<Int>
+    return "your-256-bit-secret".bytes()
+
+// Sign, then assert the produced token equals the oracle string AND
+// that verifying it under the same key returns the original payload.
+fun round_trip(t: Tester, stdio: Stdio, name: String, payload: String, key: String, want_token: String)
+    let k = key.bytes()
+    let token = sign_hs256(payload, k)
+    t.eq_str(stdio, "${name}_sign", token, want_token)
+    t.eq_str(stdio, "${name}_verify", verify_outcome(verify_hs256(token, k)), payload)
+
+fun main(stdio: Stdio)
+    let t = tester()
+    let key = jwtio_key()
+
+    // --- The well-known jwt.io HS256 vector (byte for byte) ---
+
+    let jwtio_payload = "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"iat\":1516239022}"
+    let jwtio_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+    t.eq_str(stdio, "jwtio_sign", sign_hs256(jwtio_payload, key), jwtio_token)
+    t.eq_str(stdio, "jwtio_verify", verify_outcome(verify_hs256(jwtio_token, key)), jwtio_payload)
+
+    // The header segment is exactly base64url({"alg":"HS256","typ":"JWT"}).
+    t.starts_with(stdio, "jwtio_header",
+        jwtio_token, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.")
+
+    // --- Round-trips: sign matches the oracle, verify returns payload ---
+
+    round_trip(t, stdio, "rt_alice",
+        "{\"user\":\"alice\",\"role\":\"admin\"}", "k1",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoiYWxpY2UiLCJyb2xlIjoiYWRtaW4ifQ.XX6e---2fRafB3q2HuFaFywvS2NPDP_zeA2Ptwx9epE")
+
+    round_trip(t, stdio, "rt_bob",
+        "{\"exp\":2000000000,\"sub\":\"bob\"}", "super-secret-key",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDAwMDAwMDAsInN1YiI6ImJvYiJ9.brnijNaI0k6KmAa1VW_K_N_fkU1WRmSbjgkd0MvQ_5w")
+
+    round_trip(t, stdio, "rt_empty_obj",
+        "{}", "x",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.CNtjEvFCY3oEKoVULG8G2-eZgrNp5SN5aTVtlGBTUzo")
+
+    round_trip(t, stdio, "rt_nested",
+        "{\"a\":1,\"b\":2,\"c\":[1,2,3],\"nested\":{\"z\":true}}", "another-key-123456",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhIjoxLCJiIjoyLCJjIjpbMSwyLDNdLCJuZXN0ZWQiOnsieiI6dHJ1ZX19.UIXZvOGMqGZkKNKTz4w1aWCDa9NNfr1bz2aSGoOIPuM")
+
+    // A fresh sign/verify under a random-ish key also round-trips.
+    let rt_payload = "{\"iss\":\"capa\",\"scope\":\"read write\",\"n\":42}"
+    t.eq_str(stdio, "rt_fresh",
+        verify_outcome(verify_hs256(sign_hs256(rt_payload, "hunter2-hunter2-hunter2".bytes()),
+            "hunter2-hunter2-hunter2".bytes())),
+        rt_payload)
+
+    // --- Security battery: signature tampering -> InvalidSignature ---
+
+    // A tampered PAYLOAD (the "sub" changed) keeps the original tag, so
+    // the recomputed HMAC no longer matches.
+    t.eq_str(stdio, "tamper_payload",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OTk5OTk5OTk5IiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:InvalidSignature")
+
+    // A tampered SIGNATURE (last char flipped) does not match.
+    t.eq_str(stdio, "tamper_sig",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5A", key)),
+        "err:InvalidSignature")
+
+    // A token correctly signed under a DIFFERENT key does not verify
+    // under the jwt.io key.
+    t.eq_str(stdio, "resign_diff_key",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.DcV3cDBT57e-fZJnJRB-TBcfdOVCPTSWc0YfXGt_mOU", key)),
+        "err:InvalidSignature")
+
+    // The same key verifies the genuine token (guards against a compare
+    // that rejects everything).
+    t.eq_str(stdio, "genuine_ok",
+        verify_outcome(verify_hs256(jwtio_token, key)), jwtio_payload)
+
+    // --- Security battery: algorithm confusion -> UnsupportedAlgorithm ---
+
+    // alg:"none" WITH an empty signature (the classic bypass) is
+    // rejected at the gate, never reaching the (empty) signature.
+    t.eq_str(stdio, "alg_none",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.", key)),
+        "err:UnsupportedAlgorithm")
+
+    // alg:"HS384" (even carrying a valid-looking HS256 tag) is rejected.
+    t.eq_str(stdio, "alg_hs384",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:UnsupportedAlgorithm")
+
+    // alg:"RS256" (the asymmetric-confusion vector) is rejected.
+    t.eq_str(stdio, "alg_rs256",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:UnsupportedAlgorithm")
+
+    // A header that is not a JSON object (base64url of "42").
+    t.eq_str(stdio, "header_not_object",
+        verify_outcome(verify_hs256(
+            "NDI.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:UnsupportedAlgorithm")
+
+    // A header object with no "alg" parameter.
+    t.eq_str(stdio, "header_no_alg",
+        verify_outcome(verify_hs256(
+            "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:UnsupportedAlgorithm")
+
+    // A VALIDLY-SIGNED token whose header carries a `crit` (critical)
+    // parameter is rejected: RFC 7515 section 4.1.11 requires a verifier
+    // to reject a JWS with a critical parameter it does not understand,
+    // and this library understands none. The signature over this token
+    // is correct, so the rejection is the crit gate, not a bad tag.
+    t.eq_str(stdio, "header_crit",
+        verify_outcome(verify_hs256(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImNyaXQiOlsiZXhwIl19.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.84NYgRIurr8oA_9SaXnBQp0az6Hgu0Os1OtOjQ_dhJ8", key)),
+        "err:UnsupportedAlgorithm")
+
+    // --- Security battery: malformed inputs -> MalformedToken ---
+
+    t.eq_str(stdio, "two_parts",
+        verify_outcome(verify_hs256("a.b", key)), "err:MalformedToken")
+    t.eq_str(stdio, "four_parts",
+        verify_outcome(verify_hs256("a.b.c.d", key)), "err:MalformedToken")
+    t.eq_str(stdio, "empty_token",
+        verify_outcome(verify_hs256("", key)), "err:MalformedToken")
+    // Bad base64 in the header segment.
+    t.eq_str(stdio, "bad_base64_header",
+        verify_outcome(verify_hs256(
+            "@@@@.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", key)),
+        "err:MalformedToken")
+
+    // A non-ASCII payload is a documented scope boundary: it signs and
+    // its signature verifies, but the decoded bytes are not ASCII JSON
+    // text (Capa has no bytes-to-String primitive), so verify reports
+    // MalformedToken rather than returning mojibake.
+    let utf8_payload = "{\"name\":\"caf\u{e9}\"}"
+    let utf8_token = sign_hs256(utf8_payload, key)
+    t.eq_str(stdio, "non_ascii_payload",
+        verify_outcome(verify_hs256(utf8_token, key)), "err:MalformedToken")
+
+    // --- is_expired against a fixed `now` ---
+
+    // exp strictly in the past -> expired.
+    t.eq_str(stdio, "exp_past",
+        expired_outcome(is_expired("{\"exp\":1000}", 2000)), "true")
+    // exp strictly in the future -> not expired.
+    t.eq_str(stdio, "exp_future",
+        expired_outcome(is_expired("{\"exp\":2000000000}", 1600000000)), "false")
+    // exp exactly at `now` -> expired (exp <= now).
+    t.eq_str(stdio, "exp_equal",
+        expired_outcome(is_expired("{\"exp\":1500}", 1500)), "true")
+    // A missing exp is surfaced, not treated as never-expiring.
+    t.eq_str(stdio, "exp_missing",
+        expired_outcome(is_expired("{\"sub\":\"x\"}", 1500)), "err:InvalidClaim")
+    // exp present but the wrong type (a string).
+    t.eq_str(stdio, "exp_wrong_type",
+        expired_outcome(is_expired("{\"exp\":\"soon\"}", 1500)), "err:InvalidClaim")
+    // A non-object payload.
+    t.eq_str(stdio, "exp_not_object",
+        expired_outcome(is_expired("[1,2,3]", 1500)), "err:InvalidClaim")
+    // An unparseable payload.
+    t.eq_str(stdio, "exp_bad_json",
+        expired_outcome(is_expired("{not json", 1500)), "err:MalformedToken")
+    // An `exp` beyond the i64 range (parsed as a Float) is rejected as
+    // InvalidClaim on BOTH backends, deterministically. Converting such
+    // a value to an Int traps on Wasm ("integer overflow") while Python
+    // silently succeeds; the Float range-check in exp_result closes that
+    // divergence, so these must agree under `capa test --both`.
+    t.eq_str(stdio, "exp_huge_below_max",
+        expired_outcome(is_expired("{\"exp\":9300000000000000000}", 1600000000)), "err:InvalidClaim")
+    t.eq_str(stdio, "exp_huge_over_i64",
+        expired_outcome(is_expired("{\"exp\":99999999999999999999}", 1600000000)), "err:InvalidClaim")
+    t.eq_str(stdio, "exp_huge_negative",
+        expired_outcome(is_expired("{\"exp\":-99999999999999999999}", 1600000000)), "err:InvalidClaim")
+    // A large but in-range `exp` (well under 2^63) still works normally.
+    t.eq_str(stdio, "exp_large_in_range",
+        expired_outcome(is_expired("{\"exp\":9000000000000000000}", 1600000000)), "false")
+
+    // --- Error messages ---
+
+    t.eq_str(stdio, "msg_invalid_sig",
+        jwt_error_message(InvalidSignature), "invalid signature")
+    t.eq_str(stdio, "msg_unsupported",
+        jwt_error_message(UnsupportedAlgorithm("none")), "unsupported algorithm: none")
+    t.eq_str(stdio, "msg_invalid_claim",
+        jwt_error_message(InvalidClaim("no exp")), "invalid claim: no exp")
+
+    t.finish(stdio)

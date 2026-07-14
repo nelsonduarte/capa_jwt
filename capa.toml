@@ -1,0 +1,38 @@
+# capa_jwt package manifest. The library is pure Capa with zero
+# capabilities: JSON Web Tokens (JWS/JWT) with HS256, computed over
+# `String` and `List<Int>` bytes with no Fs, Net, Env, Time, Rand or
+# Unsafe anywhere. The verifier takes no `Clock`; expiry is checked
+# against a `now` the caller supplies, so the whole library keeps its
+# empty surface. `capa --manifest` proves it.
+#
+# capa_base64 and capa_hash are real RUNTIME dependencies: the token
+# codec is base64url from capa_base64, and the signature is HMAC-SHA256
+# plus the constant-time tag compare from capa_hash. Both are pinned to
+# their published tags and the publisher verify_key, so `capa install`
+# enforces the full supply-chain check (lockfile SHA + GPG tag signature
+# + SLSA L2 provenance) on each.
+#
+# capa_test is a dev-dependency, resolved only when this repository is
+# itself the install root (running its own tests), never when capa_jwt
+# is consumed downstream. It carries the same git + tag + verify_key
+# shape as the runtime dependencies.
+
+[package]
+name = "capa_jwt"
+version = "0.1.0"
+capa = ">=1.1.0"
+
+[dependencies.capa_base64]
+git = "https://github.com/nelsonduarte/capa_base64"
+tag = "v0.1.0"
+verify_key = "6C1D222D491FB88031E041A536CFB426101AA24B"
+
+[dependencies.capa_hash]
+git = "https://github.com/nelsonduarte/capa_hash"
+tag = "v0.1.2"
+verify_key = "6C1D222D491FB88031E041A536CFB426101AA24B"
+
+[dev-dependencies.capa_test]
+git = "https://github.com/nelsonduarte/capa_test"
+tag = "v0.1.0"
+verify_key = "6C1D222D491FB88031E041A536CFB426101AA24B"

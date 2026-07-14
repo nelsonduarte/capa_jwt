@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Vendored dependencies are produced by `capa install`; not committed.
+# The resolved lockfile IS committed so a fresh clone + `capa install`
+# reproduces, and the v1.5.0 build-time vendor verification (PKG-1) has
+# an anchor to check ./vendor against.
+vendor/
