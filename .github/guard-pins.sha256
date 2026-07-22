@@ -1,0 +1,107 @@
+# THE GUARD REVISION THIS REPOSITORY AUDITED, BY CONTENT.
+#
+# .github/workflows/release.yml pins the shared release guards by commit
+# SHA. A SHA is content-addressed and therefore immutable, so the pin
+# cannot be edited under us. What a SHA does NOT do is tell a reader what
+# is in it, and nothing states which BYTES were looked at before pinning
+# them. That is what this file is for.
+#
+# Every file the guards execute is recorded below by SHA-256, taken at
+# the pinned revision. tests/test_guard_pins.sh re-fetches each one and
+# refuses any difference, so:
+#
+#   * bumping the pin without re-auditing goes RED, because the digests
+#     below describe a revision the workflow no longer names;
+#   * a pin that resolves to bytes other than the audited ones goes RED,
+#     which is the falsifiable form of "we ran what we pinned";
+#   * the check runs offline of any claim the guards make about
+#     themselves, before a tag is ever pushed.
+#
+# WHAT REMAINS TRUSTED, stated plainly rather than papered over: that
+# GitHub runs the workflow file living at the pinned SHA. A workflow
+# cannot establish its own identity from inside itself, because a
+# substituted file could simply print the expected answer. That is the
+# platform's guarantee and the reason `uses:@<sha>` is written by SHA.
+# Everything downstream of it is checked here by content.
+#
+# THE DIGESTS BELOW WERE WRITTEN BY `bash fleet/guard_pins.sh`, which
+# fetched each file at 2db00705e05b1774cf41eb58006e6533cfca4d55 and hashed it. Do not
+# hand-edit them, and do not copy this file from another repository: a
+# copied record passes every check while having audited nothing, because
+# the digests are genuinely the pinned revision's bytes. What a copy
+# cannot carry is the reading.
+#
+# TO RE-AUDIT AFTER A PIN BUMP: read the diff, then re-run
+# `bash fleet/guard_pins.sh <this repository>` and rewrite the note below.
+#
+#   https://github.com/nelsonduarte/capa-language/compare/<old>...2db00705e05b1774cf41eb58006e6533cfca4d55
+
+# ---------------------------------------------------------------------
+# AUDIT NOTE.
+#
+# FIRST PIN FOR THIS REPOSITORY, so there is no diff to read. All five
+# files below were fetched at 2db0070 and read in full: 608 lines of
+# release-guards.yml, 80 of capa_floor.sh, 112 of check_tag_version.sh,
+# 223 of clean_room_build.sh and 148 of verify_guard_digests.sh. Their
+# digests were also recomputed locally from the fetched bytes and match
+# the five lines below.
+#
+# THIS IS THE FIRST ADOPTEE WITH REAL RUNTIME DEPENDENCIES, so one
+# paragraph of release-guards.yml that was hypothetical everywhere else
+# is live here. The `Guard 2` step sets `GH_TOKEN: ${{ github.token }}`
+# and its comment states why: without a token, `capa install` inside the
+# clean room "degrades to the GPG layer and emits 'SLSA provenance not
+# verified' warnings while the room still goes green". In the pure
+# siblings that covered one dev-dependency. Here it covers capa_base64
+# and capa_hash, which supply this package's base64url codec and its
+# HMAC, so the token is what makes "the guard verified the provenance of
+# every dependency" a true sentence rather than a green log. Nothing in
+# this repository can set that input; it is the shared workflow's, and it
+# is set at this revision.
+#
+# TWO THINGS THE PIN SAYS THAT THE COMPILER HAS SINCE MADE UNTRUE, and
+# neither reaches this repository:
+#
+#   * capa_floor.sh's header states that nothing in the compiler enforces
+#     the manifest floor and that "this guard is the only thing that
+#     tests the claim". capa 1.19.0 changed that: capa/pkg/_floor.py now
+#     makes the ROOT floor a hard error and a DEPENDENCY's floor a
+#     warning. The script's behaviour is unaffected; only its comment is
+#     stale.
+#   * its floor grammar is still `[0-9][0-9.]*[0-9]`, which accepts
+#     two- and four-component versions that the compiler-side parser now
+#     refuses. `>=1.18.1` is read identically as 1.18.1 by both.
+#
+#   Run against this repository's new manifest at this revision:
+#   capa_floor.sh prints 1.18.1, and check_tag_version.sh accepts v0.2.0
+#   and refuses v0.1.0 with "manifest says 0.2.0". That is what confirms
+#   the long comment blocks now sitting inside [package] parse as neither
+#   a second version nor a second floor: both scripts are table-scoped
+#   and skip `#` lines, and this repository's comments include lines
+#   quoting `capa = '>=99.0.0'` and `max=['Stdio']` from measured output.
+#
+# THE DEPENDENCY FLOORS ARE NOT THE GUARD'S BUSINESS AT THIS PIN, which
+# is worth recording because it looks like it should be. capa_floor.sh
+# reads the ROOT manifest only, so the `>=1.1.0` that capa_base64 v0.1.0
+# and capa_hash v0.1.2 still declare never reaches the choice of clean-
+# room compiler. The clean room downloads 1.18.1, this package's own
+# floor, and 1.18.1 predates the dependency-floor warning entirely.
+#
+# NOTHING IS EXPORT-IGNORED HERE. clean_room_build.sh exists partly
+# because capa_authgate shipped a tarball whose README named a script
+# `.gitattributes` had removed. This repository's .gitattributes carries
+# only `* text eol=lf` and there is no tools/ directory, so the tarball
+# is the repository. Confirmed against `git archive`: 25 entries, both
+# modules, tests/, capa.toml, capa.lock, publisher.asc and all three
+# workflows.
+#
+# Moving the pin is a fleet decision and is not made here.
+# ---------------------------------------------------------------------
+
+revision 2db00705e05b1774cf41eb58006e6533cfca4d55
+
+4bee86b2951bd33d3cb8bab6721b2abb30f0533a010dfe93d36ebb275497f1d4  .github/workflows/release-guards.yml
+212b06bb4be0100267fcc98bb2be7f99f4860007f51ae222ed359cddb638eaa2  tools/capa_floor.sh
+420290eb75a96f49aed937be40a3d63d1e2db3aba2de4a4a87c9282eb2a13b38  tools/check_tag_version.sh
+537a7e902540efe4fe5c8f4ae72788b2f3595696b8a7a4bb0a54e19fe523ffcd  tools/clean_room_build.sh
+4fa535d216ecbd647444c80e4cab978ff8e636e1d5edb437842ee561b9f17e0f  tools/verify_guard_digests.sh
