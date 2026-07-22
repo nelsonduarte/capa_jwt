@@ -19,8 +19,129 @@
 
 [package]
 name = "capa_jwt"
-version = "0.1.0"
-capa = ">=1.1.0"
+
+# ONE CONSUMER, capa_authgate, and neither the version bump nor the
+# floor below disturbs it. It declares `tag = "v0.1.0"` and its capa.lock
+# records the resolved commit 39b5cbe, so both reach it only when it
+# deliberately re-pins. The floor set here is the claim it inherits at
+# that moment, which is why it had to be the true one.
+version = "0.2.0"
+
+# THE FLOOR, established here by running released binaries against a
+# tarball of this tree rather than by inheriting a sibling's argument.
+# It declared `>=1.1.0`, which was not merely untested but FALSE.
+#
+#   1.16.0, 1.17.0  `capa --check example.capa` fails: "cannot resolve
+#                   'import capa_jwt.jwt'". PR #85 (capa 1.18.0) made
+#                   `[package].name` map to the project root; below it,
+#                   a package that imports itself by name inside an
+#                   extracted `capa_jwt-v<tag>/` resolves to nothing.
+#                   tests/ self-imports the same way, so `capa test`
+#                   goes with it.
+#   1.18.0          `capa --check` passes on both modules, and then
+#                   `capa test` reports "1 test(s): 0 passed, 1 failed"
+#                   with "unrecognized arguments: -m" (1.17.0 fails the
+#                   same way, behind the earlier failure). Under
+#                   PyInstaller the runner spawned
+#                   `sys.executable -m capa`, and a frozen binary is not
+#                   a Python interpreter. 1.18.1 is the first release
+#                   whose binary can run the suite at all.
+#
+# So >=1.18.1, the oldest compiler that completes the flow the README
+# documents. Narrowing the toolchain is a real change, hence 0.1.0 ->
+# 0.2.0.
+#
+# WHAT CARRIES IT, PRECISELY, because this is the first package in the
+# fleet with real runtime dependencies and the obvious guess is wrong.
+# It is carried by example.capa and by tests/, exactly as in the pure
+# siblings. It is NOT carried by the library head: `capa --check
+# jwt.capa` reports "ok (62 items, 1428 expressions typed, 685
+# bindings)" on 1.16.0, unchanged on 1.18.1, even though its import
+# closure runs through vendor/capa_hash/hmac.capa and that module
+# self-imports `capa_hash.sha256` and `capa_hash.tables`. A vendored
+# package's self-import resolves at `<root>/vendor/capa_hash/<mod>.capa`,
+# a path the pre-#85 resolver already tried, so capa_hash's own floor
+# argument (which bit its LIBRARY, not just its example) does not
+# transfer to a consumer. Depending on capa_hash does not raise this
+# package's floor by one release.
+capa = ">=1.18.1"
+
+# THE CEILING. `max` bounds every capability reachable from a checked
+# entry point, including through the dependencies, and it is what a
+# consumer of this library inherits as a machine-checked bound rather
+# than as a paragraph of README.
+#
+# Stdio and nothing else. The library is pure; the single Stdio is
+# example.capa's own printing. Measured on the released 1.18.1 against a
+# tarball of this tree, by reading output rather than exit codes:
+#
+#   * A `pub fun load_key_file(fs: Fs, path: String) -> Result<String,
+#     IoError>` added to jwt.capa is ACCEPTED by `capa --check`: "ok (63
+#     items, 1431 expressions typed, 687 bindings)" against 62/1428/685
+#     without it. It would ship. `capa --check-capabilities` refuses it
+#     by name on both entries: "package 'capa_jwt' declares
+#     max=['Stdio'] but its own code introduces 'Fs'".
+#
+#   * THE SAME DEFECT PLANTED INSIDE A DEPENDENCY IS ALSO CAUGHT, which
+#     is the part that is new here and the strongest reason this package
+#     wants a ceiling. An `Fs`-taking function added to
+#     vendor/capa_hash/hmac.capa gives "package 'capa_jwt' declares
+#     max=['Stdio'] but dependency 'capa_hash' introduces 'Fs' (via
+#     capa_jwt -> capa_hash)". The bound is over the product, not over
+#     this repository's own two files, so a future re-pin that widened a
+#     dependency's authority would redden the release here.
+#
+#     Reaching that measurement took CAPA_NO_VERIFY=1, because editing a
+#     vendored tree is refused first: "vendored dependency 'capa_hash' is
+#     at the locked commit 449488a... but its working tree has
+#     uncommitted changes". That refusal is a second, independent layer
+#     and it fired without being asked for.
+#
+#   * The closure boundary was measured, not reasoned about. The same
+#     defect placed in example.capa instead leaves `capa
+#     --check-capabilities jwt.capa` at exit 0, "OK - every declared
+#     capability ceiling holds", while example.capa fails. The command
+#     covers the import closure of the entry it is given, so BOTH
+#     top-level modules are ceiling entries and neither covers the other.
+#
+#   * `max = []` was measured too, and refuses example.capa on 'Stdio'.
+#     example.capa is a module the README tells readers to run with
+#     `capa --run`, so an empty ceiling would either drop it from the
+#     release checks or ship a package whose documented command fails.
+[capabilities]
+max = ["Stdio"]
+
+# THE DEPENDENCY PINS ARE EXACT AND ARE DELIBERATELY NOT MOVED.
+# capa_base64 v0.1.0 and capa_hash v0.1.2 are the tags published BEFORE
+# those repositories corrected their own `>=1.1.0` floors, and both of
+# their manifests still carry the false one. That changes nothing here,
+# and the reason is worth stating because "my dependency declares a
+# false floor" sounds like it should:
+#
+#   * `capa install` clones a tag pin by exact tag and checks it against
+#     the commit in capa.lock (dc90c42 and 449488a). Nothing floats, and
+#     a new tag upstream does not reach this package until it re-pins.
+#   * A dependency's floor is a WARNING and only when the running
+#     compiler is BELOW it (capa/pkg/_floor.py). Both declare 1.1.0,
+#     which every compiler at or above this package's own 1.18.1 floor
+#     satisfies, so the warning cannot fire. A floor that is too LOW can
+#     only ever UNDER-warn; it cannot mis-warn.
+#   * The mechanism was confirmed reachable rather than assumed absent.
+#     Forcing the vendored capa_hash floor to `>=99.0.0` produces, on
+#     1.19.0, "capa: warning: dependency 'capa_hash' declares capa =
+#     '>=99.0.0' ... but this compiler is 1.19.0". On 1.18.1, the
+#     compiler this package's floor names and the one the clean room
+#     downloads, the same edit produces NO warning at all: dependency
+#     floors are read only from 1.19.0 onwards. So on the release path
+#     the transitive floor is not consulted, and nothing in the flow
+#     depends on it being right.
+#   * Nothing else in the flow reads it either. The vendored sources are
+#     compiled by the same compiler that compiles this package, and the
+#     [capabilities] ceiling above reaches them, so their authority is
+#     derived here and not taken on the dependency's word.
+#
+# Re-pinning to capa_base64 v0.2.0 and capa_hash v0.2.0 is a separate
+# decision with its own clean-room verification, and it is not made here.
 
 [dependencies.capa_base64]
 git = "https://github.com/nelsonduarte/capa_base64"
