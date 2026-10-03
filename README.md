@@ -2,12 +2,12 @@
 
 Pure-Capa JSON Web Tokens (JWS/JWT) with the **HS256** algorithm. Zero
 capabilities: signing and verifying a token are data transforms over a
-`String` and a `List<Int>` key. Nothing here can touch the filesystem,
-the network, the clock, randomness, or anything else; the library holds
-no authority and reads no global state. The verifier takes **no
-`Clock`** either, expiry is checked against a `now` the caller passes
-in, so the whole library keeps its empty capability surface.
-`capa --manifest` proves it (see [Audit claim](#audit-claim)). Output is
+`String` and a `List<Int>` key. The library's functions declare no
+capability, and the compiler refuses any capability call in them; it
+reads no global state. The verifier takes **no `Clock`** either, expiry is
+checked against a `now` the caller passes in, so the whole library
+keeps its empty capability surface. `capa --manifest` records it (see
+[Audit claim](#audit-claim)). Output is
 byte-identical on the Python and Wasm backends.
 
 The signature is `HMAC-SHA256(key, header_b64 + "." + payload_b64)`,
@@ -186,7 +186,7 @@ oracle, CWE-208) is never used.
 ## Dependencies
 
 `capa_jwt` is the first Capa library built by composing other Capa
-libraries: it is assembled from two pure seed libraries, declared as
+libraries: it is assembled from two capability-free seed libraries, declared as
 real runtime dependencies in [`capa.toml`](./capa.toml) and pinned by
 tag and publisher `verify_key`:
 
@@ -213,7 +213,7 @@ verify_key = "6C1D222D491FB88031E041A536CFB426101AA24B"
 
 `capa install` clones both into `./vendor/` and enforces the full
 supply-chain check (lockfile SHA + GPG tag signature + SLSA L2
-provenance) on each. Both are themselves pure, zero-capability libraries,
+provenance) on each. Both are themselves zero-capability libraries,
 so `capa_jwt`'s empty surface holds transitively.
 
 ## Verification
@@ -268,7 +268,7 @@ only when this repository is the install root, so a consumer of
 ## Audit claim
 
 A token library is exactly the kind of dependency a supply-chain
-attacker wants to own, so this one proves the empty claim about itself.
+attacker wants to own, so this one shows its empty capability surface.
 `capa --manifest jwt.capa` over the library and its transitively reached
 dependency code reports, for **every** function:
 
@@ -287,8 +287,8 @@ functions take **no capability parameters**: `verify_hs256` and
 `provably_excluded_capabilities`. The only capabilities anywhere in this
 repository are in the example and are the example's own (`Stdio` to
 print). **You can verify a JWT while holding no authority at all**, that
-is the whole showcase: a token check that provably cannot read a file,
-open a socket, or read the clock.
+is the whole showcase: a token check whose functions declare no
+capability.
 
 ## Honest posture
 
