@@ -3,7 +3,7 @@
 Pure-Capa JSON Web Tokens (JWS/JWT) with the **HS256** algorithm. Zero
 capabilities: signing and verifying a token are data transforms over a
 `String` and a `List<Int>` key. The library's functions declare no
-capability, and the compiler refuses any capability call in them; it
+capability, and the compiler refuses a call in them on a built-in capability that is not in scope; it
 reads no global state. The verifier takes **no `Clock`** either, expiry is
 checked against a `now` the caller passes in, so the whole library
 keeps its empty capability surface. `capa --manifest` records it (see
